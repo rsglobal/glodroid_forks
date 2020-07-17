@@ -20,6 +20,7 @@
 
 #include <cutils/properties.h>
 #include <log/log.h>
+#include <sys/stat.h>
 #include <sstream>
 #include <string>
 
@@ -32,7 +33,7 @@ int ResourceManager::Init() {
   char path_pattern[PROPERTY_VALUE_MAX];
   // Could be a valid path or it can have at the end of it the wildcard %
   // which means that it will try open all devices until an error is met.
-  int path_len = property_get("hwc.drm.device", path_pattern, "/dev/dri/card0");
+  int path_len = property_get("hwc.drm.device", path_pattern, "/dev/dri/card%");
   int ret = 0;
   if (path_pattern[path_len - 1] != '%') {
     ret = AddDrmDevice(std::string(path_pattern));
@@ -41,7 +42,13 @@ int ResourceManager::Init() {
     for (int idx = 0; !ret; ++idx) {
       std::ostringstream path;
       path << path_pattern << idx;
-      ret = AddDrmDevice(path.str());
+
+      struct stat buf;
+      if (stat(path.str().c_str(), &buf)) {
+        break;
+      } else if (HasKMSDev(path.str().c_str())) {
+        ret = AddDrmDevice(path.str());
+      }
     }
   }
 
