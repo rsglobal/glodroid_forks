@@ -94,6 +94,26 @@ DrmConnector *ResourceManager::AvailableWritebackConnector(int display) {
   return writeback_conn;
 }
 
+bool ResourceManager::HasKMSDev(const char *path) {
+  int fd = open(path, O_RDWR | O_CLOEXEC);
+  if (fd < 0)
+    return false;
+
+  auto res = drmModeGetResources(fd);
+  if (!res) {
+    close(fd);
+    return false;
+  }
+
+  bool has_kms = res->count_crtcs > 0 && res->count_connectors > 0 &&
+                 res->count_encoders > 0;
+
+  drmModeFreeResources(res);
+  close(fd);
+
+  return has_kms;
+}
+
 DrmDevice *ResourceManager::GetDrmDevice(int display) {
   for (auto &drm : drms_) {
     if (drm->HandlesDisplay(display))
