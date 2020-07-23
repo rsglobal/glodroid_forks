@@ -38,6 +38,7 @@
 #include <sync/sync.h>
 #include <sys/types.h>
 #include <drm-uapi/drm_fourcc.h>
+#include <android/gralloc_handle.h>
 
 #include "util/os_file.h"
 
@@ -581,6 +582,8 @@ get_back_bo(struct dri2_egl_surface *dri2_surf)
    int offset = 0, fds[3];
    unsigned num_fds;
 
+   struct gralloc_handle_t *handle = gralloc_handle(dri2_surf->buffer->handle);
+
    if (dri2_surf->dri_image_back)
       return 0;
 
@@ -607,16 +610,35 @@ get_back_bo(struct dri2_egl_surface *dri2_surf)
          return -1;
       }
 
-      dri2_surf->dri_image_back =
-         dri2_dpy->image->createImageFromFds(dri2_dpy->dri_screen,
-                                             dri2_surf->base.Width,
-                                             dri2_surf->base.Height,
-                                             fourcc,
-                                             fds,
-                                             num_fds,
-                                             &pitch,
-                                             &offset,
-                                             dri2_surf);
+      if (handle->magic == GRALLOC_HANDLE_MAGIC) {
+         unsigned error;
+
+         dri2_surf->dri_image_back =
+            dri2_dpy->image->createImageFromDmaBufs2(dri2_dpy->dri_screen,
+                                                     dri2_surf->base.Width,
+                                                     dri2_surf->base.Height,
+                                                     fourcc,
+                                                     handle->modifier,
+                                                     fds,
+                                                     num_fds,
+                                                     &pitch,
+                                                     &offset,
+                                                     0, 0, 0, 0,
+                                                     &error,
+                                                     NULL);
+      } else {
+         dri2_surf->dri_image_back =
+            dri2_dpy->image->createImageFromFds(dri2_dpy->dri_screen,
+                                                dri2_surf->base.Width,
+                                                dri2_surf->base.Height,
+                                                fourcc,
+                                                fds,
+                                                num_fds,
+                                                &pitch,
+                                                &offset,
+                                                dri2_surf);
+      }
+
       if (!dri2_surf->dri_image_back) {
          _eglLog(_EGL_WARNING, "failed to create DRI image from FD");
          return -1;
@@ -779,13 +801,18 @@ droid_create_image_from_prime_fds_yuv(_EGLDisplay *disp, _EGLContext *ctx,
                                      struct ANativeWindowBuffer *buf,
                                      int num_fds, int fds[3])
 {
+   struct gralloc_handle_t *handle = gralloc_handle(buf->handle);
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
+   uint64_t modifier = DRM_FORMAT_MOD_INVALID;
    struct android_ycbcr ycbcr;
    size_t offsets[3];
    size_t pitches[3];
    enum chroma_order chroma_order;
    int fourcc;
    int ret;
+
+   if (handle->magic == GRALLOC_HANDLE_MAGIC)
+      modifier = handle->modifier;
 
    if (!dri2_dpy->gralloc->lock_ycbcr) {
       _eglLog(_EGL_WARNING, "Gralloc does not support lock_ycbcr");
@@ -861,6 +888,10 @@ droid_create_image_from_prime_fds_yuv(_EGLDisplay *disp, _EGLContext *ctx,
          EGL_DMA_BUF_PLANE1_FD_EXT, fds[1],
          EGL_DMA_BUF_PLANE1_PITCH_EXT, pitches[1],
          EGL_DMA_BUF_PLANE1_OFFSET_EXT, offsets[1],
+         EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, modifier,
+         EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, modifier >> 32,
+         EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, modifier,
+         EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT, modifier >> 32,
          EGL_NONE, 0
       };
 
@@ -880,6 +911,12 @@ droid_create_image_from_prime_fds_yuv(_EGLDisplay *disp, _EGLContext *ctx,
          EGL_DMA_BUF_PLANE2_FD_EXT, fds[2],
          EGL_DMA_BUF_PLANE2_PITCH_EXT, pitches[2],
          EGL_DMA_BUF_PLANE2_OFFSET_EXT, offsets[2],
+         EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, modifier,
+         EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, modifier >> 32,
+         EGL_DMA_BUF_PLANE1_MODIFIER_LO_EXT, modifier,
+         EGL_DMA_BUF_PLANE1_MODIFIER_HI_EXT, modifier >> 32,
+         EGL_DMA_BUF_PLANE2_MODIFIER_LO_EXT, modifier,
+         EGL_DMA_BUF_PLANE2_MODIFIER_HI_EXT, modifier >> 32,
          EGL_NONE, 0
       };
 
@@ -891,7 +928,11 @@ static _EGLImage *
 droid_create_image_from_prime_fds(_EGLDisplay *disp, _EGLContext *ctx,
                                   struct ANativeWindowBuffer *buf, int num_fds, int fds[3])
 {
+   struct gralloc_handle_t *handle = gralloc_handle(buf->handle);
    unsigned int pitch;
+   uint64_t modifier = DRM_FORMAT_MOD_INVALID;
+   if (handle->magic == GRALLOC_HANDLE_MAGIC)
+      modifier = handle->modifier;
 
    if (is_yuv(buf->format)) {
       _EGLImage *image;
@@ -934,6 +975,8 @@ droid_create_image_from_prime_fds(_EGLDisplay *disp, _EGLContext *ctx,
       EGL_DMA_BUF_PLANE0_FD_EXT, fds[0],
       EGL_DMA_BUF_PLANE0_PITCH_EXT, pitch,
       EGL_DMA_BUF_PLANE0_OFFSET_EXT, 0,
+      EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT, modifier,
+      EGL_DMA_BUF_PLANE0_MODIFIER_HI_EXT, modifier >> 32,
       EGL_NONE, 0
    };
 
