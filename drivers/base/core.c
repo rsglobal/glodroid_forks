@@ -122,7 +122,7 @@ int device_links_read_lock_held(void)
  * Check if @target depends on @dev or any device dependent on it (its child or
  * its consumer etc).  Return 1 if that is the case or 0 otherwise.
  */
-static int device_is_dependent(struct device *dev, void *target)
+int device_is_dependent(struct device *dev, void *target)
 {
 	struct device_link *link;
 	int ret;
@@ -1184,7 +1184,7 @@ static void device_links_purge(struct device *dev)
 	device_links_write_unlock();
 }
 
-static u32 fw_devlink_flags = DL_FLAG_SYNC_STATE_ONLY;
+static u32 fw_devlink_flags = DL_FLAG_AUTOPROBE_CONSUMER;
 static int __init fw_devlink_setup(char *arg)
 {
 	if (!arg)

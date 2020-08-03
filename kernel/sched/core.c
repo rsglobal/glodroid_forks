@@ -26,6 +26,9 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/sched.h>
 
+#undef CREATE_TRACE_POINTS
+#include <trace/hooks/sched.h>
+
 /*
  * Export tracepoints that act as a bare tracehook (ie: have no trace event
  * associated with them) to allow external modules to probe them.
@@ -1293,6 +1296,8 @@ static inline void enqueue_task(struct rq *rq, struct task_struct *p, int flags)
 
 	uclamp_rq_inc(rq, p);
 	p->sched_class->enqueue_task(rq, p, flags);
+
+	trace_android_rvh_enqueue_task(rq, p);
 }
 
 static inline void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
@@ -1307,6 +1312,8 @@ static inline void dequeue_task(struct rq *rq, struct task_struct *p, int flags)
 
 	uclamp_rq_dec(rq, p);
 	p->sched_class->dequeue_task(rq, p, flags);
+
+	trace_android_rvh_dequeue_task(rq, p);
 }
 
 void activate_task(struct rq *rq, struct task_struct *p, int flags)
@@ -1315,6 +1322,7 @@ void activate_task(struct rq *rq, struct task_struct *p, int flags)
 
 	p->on_rq = TASK_ON_RQ_QUEUED;
 }
+EXPORT_SYMBOL_GPL(activate_task);
 
 void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 {
@@ -1322,6 +1330,7 @@ void deactivate_task(struct rq *rq, struct task_struct *p, int flags)
 
 	dequeue_task(rq, p, flags);
 }
+EXPORT_SYMBOL_GPL(deactivate_task);
 
 /*
  * __normal_prio - return the priority that is based on the static prio
@@ -1426,6 +1435,7 @@ void check_preempt_curr(struct rq *rq, struct task_struct *p, int flags)
 	if (task_on_rq_queued(rq->curr) && test_tsk_need_resched(rq->curr))
 		rq_clock_skip_update(rq);
 }
+EXPORT_SYMBOL_GPL(check_preempt_curr);
 
 #ifdef CONFIG_SMP
 
@@ -1737,6 +1747,7 @@ void set_task_cpu(struct task_struct *p, unsigned int new_cpu)
 
 	__set_task_cpu(p, new_cpu);
 }
+EXPORT_SYMBOL_GPL(set_task_cpu);
 
 #ifdef CONFIG_NUMA_BALANCING
 static void __migrate_swap_task(struct task_struct *p, int cpu)
@@ -2015,7 +2026,11 @@ static int select_fallback_rq(int cpu, struct task_struct *p)
 	int nid = cpu_to_node(cpu);
 	const struct cpumask *nodemask = NULL;
 	enum { cpuset, possible, fail } state = cpuset;
-	int dest_cpu;
+	int dest_cpu = -1;
+
+	trace_android_rvh_select_fallback_rq(cpu, p, &dest_cpu);
+	if (dest_cpu >= 0)
+		return dest_cpu;
 
 	/*
 	 * If the node that the CPU is on has been offlined, cpu_to_node()
@@ -3699,6 +3714,8 @@ void scheduler_tick(void)
 	rq->idle_balance = idle_cpu(cpu);
 	trigger_load_balance(rq);
 #endif
+
+	trace_android_rvh_scheduler_tick(rq);
 }
 
 #ifdef CONFIG_NO_HZ_FULL
@@ -5007,9 +5024,6 @@ recheck:
 			return retval;
 	}
 
-	if (pi)
-		cpuset_read_lock();
-
 	/*
 	 * Make sure no PI-waiters arrive (or leave) while we are
 	 * changing the priority of the task:
@@ -5084,8 +5098,6 @@ change:
 	if (unlikely(oldpolicy != -1 && oldpolicy != p->policy)) {
 		policy = oldpolicy = -1;
 		task_rq_unlock(rq, p, &rf);
-		if (pi)
-			cpuset_read_unlock();
 		goto recheck;
 	}
 
@@ -5146,10 +5158,8 @@ change:
 	preempt_disable();
 	task_rq_unlock(rq, p, &rf);
 
-	if (pi) {
-		cpuset_read_unlock();
+	if (pi)
 		rt_mutex_adjust_pi(p);
-	}
 
 	/* Run balance callbacks after we've adjusted the PI chain: */
 	balance_callback(rq);
@@ -5159,8 +5169,6 @@ change:
 
 unlock:
 	task_rq_unlock(rq, p, &rf);
-	if (pi)
-		cpuset_read_unlock();
 	return retval;
 }
 
@@ -5245,14 +5253,9 @@ do_sched_setscheduler(pid_t pid, int policy, struct sched_param __user *param)
 	rcu_read_lock();
 	retval = -ESRCH;
 	p = find_process_by_pid(pid);
-	if (likely(p))
-		get_task_struct(p);
-	rcu_read_unlock();
-
-	if (likely(p)) {
+	if (p != NULL)
 		retval = sched_setscheduler(p, policy, &lparam);
-		put_task_struct(p);
-	}
+	rcu_read_unlock();
 
 	return retval;
 }
@@ -7501,6 +7504,27 @@ static int cpu_uclamp_max_show(struct seq_file *sf, void *v)
 	cpu_uclamp_print(sf, UCLAMP_MAX);
 	return 0;
 }
+
+static int cpu_uclamp_ls_write_u64(struct cgroup_subsys_state *css,
+				   struct cftype *cftype, u64 ls)
+{
+	struct task_group *tg;
+
+	if (ls > 1)
+		return -EINVAL;
+	tg = css_tg(css);
+	tg->latency_sensitive = (unsigned int) ls;
+
+	return 0;
+}
+
+static u64 cpu_uclamp_ls_read_u64(struct cgroup_subsys_state *css,
+				  struct cftype *cft)
+{
+	struct task_group *tg = css_tg(css);
+
+	return (u64) tg->latency_sensitive;
+}
 #endif /* CONFIG_UCLAMP_TASK_GROUP */
 
 #ifdef CONFIG_FAIR_GROUP_SCHED
@@ -7869,6 +7893,12 @@ static struct cftype cpu_legacy_files[] = {
 		.seq_show = cpu_uclamp_max_show,
 		.write = cpu_uclamp_max_write,
 	},
+	{
+		.name = "uclamp.latency_sensitive",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.read_u64 = cpu_uclamp_ls_read_u64,
+		.write_u64 = cpu_uclamp_ls_write_u64,
+	},
 #endif
 	{ }	/* Terminate */
 };
@@ -8049,6 +8079,12 @@ static struct cftype cpu_files[] = {
 		.flags = CFTYPE_NOT_ON_ROOT,
 		.seq_show = cpu_uclamp_max_show,
 		.write = cpu_uclamp_max_write,
+	},
+	{
+		.name = "uclamp.latency_sensitive",
+		.flags = CFTYPE_NOT_ON_ROOT,
+		.read_u64 = cpu_uclamp_ls_read_u64,
+		.write_u64 = cpu_uclamp_ls_write_u64,
 	},
 #endif
 	{ }	/* terminate */
