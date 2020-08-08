@@ -519,7 +519,7 @@ int gralloc_gbm_bo_lock_ycbcr(buffer_handle_t handle,
 
 	switch (hnd->format) {
 	case HAL_PIXEL_FORMAT_YCrCb_420_SP:
-		ystride = cstride = GRALLOC_ALIGN(hnd->width, 16);
+		ystride = cstride = GRALLOC_ALIGN(hnd->width, 128);
 		ycbcr->y = addr;
 		ycbcr->cr = (unsigned char *)addr + ystride * hnd->height;
 		ycbcr->cb = (unsigned char *)addr + ystride * hnd->height + 1;
@@ -529,7 +529,7 @@ int gralloc_gbm_bo_lock_ycbcr(buffer_handle_t handle,
 		break;
 	case HAL_PIXEL_FORMAT_YV12:
 		ystride = hnd->width;
-		cstride = GRALLOC_ALIGN(ystride / 2, 16);
+		cstride = GRALLOC_ALIGN(ystride / 2, 128);
 		ycbcr->y = addr;
 		ycbcr->cr = (unsigned char *)addr + ystride * hnd->height;
 		ycbcr->cb = (unsigned char *)addr + ystride * hnd->height + cstride * hnd->height / 2;
