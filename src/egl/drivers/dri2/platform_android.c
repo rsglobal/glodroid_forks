@@ -39,6 +39,7 @@
 #include <sys/types.h>
 #include <drm-uapi/drm_fourcc.h>
 #include <android/gralloc_handle.h>
+#include <android/cros_gralloc_handle.h>
 
 #include "util/os_file.h"
 
@@ -582,6 +583,13 @@ get_back_bo(struct dri2_egl_surface *dri2_surf)
    unsigned num_fds;
 
    struct gralloc_handle_t *handle = gralloc_handle(dri2_surf->buffer->handle);
+   struct cros_gralloc_handle *cros_handle = to_cros_gralloc_handle(dri2_surf->buffer->handle);
+   uint64_t modifier = DRM_FORMAT_MOD_INVALID;
+
+   if (handle->magic == GRALLOC_HANDLE_MAGIC)
+      modifier = handle->modifier;
+   else if (cros_handle->magic == CROS_GRALLOC_MAGIC)
+      modifier = cros_handle->format_modifier;
 
    if (dri2_surf->dri_image_back)
       return 0;
@@ -609,7 +617,7 @@ get_back_bo(struct dri2_egl_surface *dri2_surf)
          return -1;
       }
 
-      if (handle->magic == GRALLOC_HANDLE_MAGIC) {
+      if (modifier != DRM_FORMAT_MOD_INVALID) {
          unsigned error;
 
          dri2_surf->dri_image_back =
@@ -617,7 +625,7 @@ get_back_bo(struct dri2_egl_surface *dri2_surf)
                                                      dri2_surf->base.Width,
                                                      dri2_surf->base.Height,
                                                      fourcc,
-                                                     handle->modifier,
+                                                     modifier,
                                                      fds,
                                                      num_fds,
                                                      &pitch,
@@ -801,6 +809,7 @@ droid_create_image_from_prime_fds_yuv(_EGLDisplay *disp, _EGLContext *ctx,
                                      int num_fds, int fds[3])
 {
    struct gralloc_handle_t *handle = gralloc_handle(buf->handle);
+   struct cros_gralloc_handle *cros_handle = to_cros_gralloc_handle(buf->handle);
    struct dri2_egl_display *dri2_dpy = dri2_egl_display(disp);
    uint64_t modifier = DRM_FORMAT_MOD_INVALID;
    struct android_ycbcr ycbcr;
@@ -812,6 +821,8 @@ droid_create_image_from_prime_fds_yuv(_EGLDisplay *disp, _EGLContext *ctx,
 
    if (handle->magic == GRALLOC_HANDLE_MAGIC)
       modifier = handle->modifier;
+   else if (cros_handle->magic == CROS_GRALLOC_MAGIC)
+      modifier = cros_handle->format_modifier;
 
    if (!dri2_dpy->gralloc->lock_ycbcr) {
       _eglLog(_EGL_WARNING, "Gralloc does not support lock_ycbcr");
@@ -928,10 +939,13 @@ droid_create_image_from_prime_fds(_EGLDisplay *disp, _EGLContext *ctx,
                                   struct ANativeWindowBuffer *buf, int num_fds, int fds[3])
 {
    struct gralloc_handle_t *handle = gralloc_handle(buf->handle);
+   struct cros_gralloc_handle *cros_handle = to_cros_gralloc_handle(buf->handle);
    unsigned int pitch;
    uint64_t modifier = DRM_FORMAT_MOD_INVALID;
    if (handle->magic == GRALLOC_HANDLE_MAGIC)
       modifier = handle->modifier;
+   else if (cros_handle->magic == CROS_GRALLOC_MAGIC)
+      modifier = cros_handle->format_modifier;
 
    if (is_yuv(buf->format)) {
       _EGLImage *image;
