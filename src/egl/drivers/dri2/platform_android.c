@@ -835,16 +835,16 @@ droid_create_image_from_prime_fds_yuv(_EGLDisplay *disp, _EGLContext *ctx,
    /* When lock_ycbcr's usage argument contains no SW_READ/WRITE flags
     * it will return the .y/.cb/.cr pointers based on a NULL pointer,
     * so they can be interpreted as offsets. */
-   offsets[0] = (size_t)ycbcr.y;
+   offsets[0] = 0;
    /* We assume here that all the planes are located in one DMA-buf. */
    if ((size_t)ycbcr.cr < (size_t)ycbcr.cb) {
       chroma_order = YCrCb;
-      offsets[1] = (size_t)ycbcr.cr;
-      offsets[2] = (size_t)ycbcr.cb;
+      offsets[1] = (size_t)ycbcr.cr - (size_t)ycbcr.y;
+      offsets[2] = (size_t)ycbcr.cb - (size_t)ycbcr.y;
    } else {
       chroma_order = YCbCr;
-      offsets[1] = (size_t)ycbcr.cb;
-      offsets[2] = (size_t)ycbcr.cr;
+      offsets[1] = (size_t)ycbcr.cb - (size_t)ycbcr.y;
+      offsets[2] = (size_t)ycbcr.cr - (size_t)ycbcr.y;
    }
 
    /* .ystride is the line length (in bytes) of the Y plane,
