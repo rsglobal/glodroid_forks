@@ -44,13 +44,21 @@
 #include <gbm.h>
 
 #include "gralloc_gbm_priv.h"
-#include <android/gralloc_handle.h>
+
+#include <android/cros_gralloc_handle.h>
+#include <drm_fourcc.h>
 
 #include <unordered_map>
 
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 
 #define unlikely(x) __builtin_expect(!!(x), 0)
+
+#define HW_ALIGN 64
+
+#define GRALLOC_ALIGN(value, base) (((value) + ((base)-1)) & ~((base)-1))
+
+#define DIV_ROUND_UP(n, d) (((n) + (d)-1) / (d))
 
 static std::unordered_map<buffer_handle_t, struct gbm_bo *> gbm_bo_handle_map;
 
@@ -94,7 +102,6 @@ static uint32_t get_gbm_format(int format)
 		fmt = GBM_FORMAT_ARGB8888;
 		break;
 	case HAL_PIXEL_FORMAT_YV12:
-		/* YV12 is planar, but must be a single buffer so ask for GR88 */
 		fmt = GBM_FORMAT_GR88;
 		break;
 	case HAL_PIXEL_FORMAT_YCbCr_422_SP:
@@ -105,37 +112,6 @@ static uint32_t get_gbm_format(int format)
 	}
 
 	return fmt;
-}
-
-static int gralloc_gbm_get_bpp(int format)
-{
-	int bpp;
-
-	switch (format) {
-	case HAL_PIXEL_FORMAT_RGBA_8888:
-	case HAL_PIXEL_FORMAT_RGBX_8888:
-	case HAL_PIXEL_FORMAT_BGRA_8888:
-		bpp = 4;
-		break;
-	case HAL_PIXEL_FORMAT_RGB_888:
-		bpp = 3;
-		break;
-	case HAL_PIXEL_FORMAT_RGB_565:
-	case HAL_PIXEL_FORMAT_YCbCr_422_I:
-		bpp = 2;
-		break;
-	/* planar; only Y is considered */
-	case HAL_PIXEL_FORMAT_YV12:
-	case HAL_PIXEL_FORMAT_YCbCr_422_SP:
-	case HAL_PIXEL_FORMAT_YCrCb_420_SP:
-		bpp = 1;
-		break;
-	default:
-		bpp = 0;
-		break;
-	}
-
-	return bpp;
 }
 
 static unsigned int get_pipe_bind(int usage)
@@ -160,48 +136,71 @@ static struct gbm_bo *gbm_import(struct gbm_device *gbm,
 		buffer_handle_t _handle)
 {
 	struct gbm_bo *bo;
-	struct gralloc_handle_t *handle = gralloc_handle(_handle);
+	struct cros_gralloc_handle *handle = to_cros_gralloc_handle(_handle);
 	#ifdef GBM_BO_IMPORT_FD_MODIFIER
 	struct gbm_import_fd_modifier_data data;
 	#else
 	struct gbm_import_fd_data data;
 	#endif
 
-	int format = get_gbm_format(handle->format);
-	if (handle->prime_fd < 0)
+	if (handle->fds[0] < 0)
 		return NULL;
 
 	memset(&data, 0, sizeof(data));
 	data.width = handle->width;
 	data.height = handle->height;
-	data.format = format;
+	data.format = get_gbm_format(handle->droid_format);
+
 	/* Adjust the width and height for a GBM GR88 buffer */
-	if (handle->format == HAL_PIXEL_FORMAT_YV12) {
-		data.width /= 2;
-		data.height += handle->height / 2;
+	if (handle->droid_format == HAL_PIXEL_FORMAT_YV12) {
+		data.width = data.width / 2;
+		data.height = DIV_ROUND_UP(handle->total_size, data.width);
+		ALOGE("Import YV12");
 	}
 
 	#ifdef GBM_BO_IMPORT_FD_MODIFIER
 	data.num_fds = 1;
-	data.fds[0] = handle->prime_fd;
-	data.strides[0] = handle->stride;
-	data.modifier = handle->modifier;
+	data.fds[0] = handle->fds[0]; /* Assume we have sigle fd for all planes */
+	data.strides[0] = handle->strides[0];
+	data.modifier = handle->format_modifier;
 	bo = gbm_bo_import(gbm, GBM_BO_IMPORT_FD_MODIFIER, &data, 0);
 	#else
-	data.fd = handle->prime_fd;
-	data.stride = handle->stride;
+	data.fd = handle->fds[0];
+	data.stride = handle->strides[0];
 	bo = gbm_bo_import(gbm, GBM_BO_IMPORT_FD, &data, 0);
 	#endif
 
+	ALOGE("Imported BO: %p", bo);
 	return bo;
+}
+
+static void populate_YV12(struct cros_gralloc_handle *handle) {
+	handle->format = DRM_FORMAT_YVU420;
+	handle->format_modifier = DRM_FORMAT_MOD_LINEAR;
+
+	handle->num_planes = 3;
+	/* Lum plane */
+	handle->offsets[0] = 0;
+	handle->strides[0] = handle->width;
+	handle->sizes[0] = handle->strides[0] * handle->height;
+	/* V (Cr) plane */
+	handle->offsets[1] = GRALLOC_ALIGN(handle->offsets[0] + handle->sizes[0], HW_ALIGN);
+	handle->strides[1] = DIV_ROUND_UP(handle->width, 2);
+	handle->sizes[1] = handle->strides[1] * handle->height / 2;
+	/* U (Cb) plane */
+	handle->offsets[2] = GRALLOC_ALIGN(handle->offsets[1] + handle->sizes[1], HW_ALIGN);
+	handle->strides[2] = handle->strides[1];
+	handle->sizes[2] = handle->sizes[1];
+
+	handle->total_size = handle->sizes[0] + handle->sizes[1] + handle->sizes[2];
 }
 
 static struct gbm_bo *gbm_alloc(struct gbm_device *gbm,
 		buffer_handle_t _handle)
 {
 	struct gbm_bo *bo;
-	struct gralloc_handle_t *handle = gralloc_handle(_handle);
-	int format = get_gbm_format(handle->format);
+	struct cros_gralloc_handle *handle = to_cros_gralloc_handle(_handle);
+	int format = get_gbm_format(handle->droid_format);
 	int usage = get_pipe_bind(handle->usage);
 	int width, height;
 
@@ -218,25 +217,36 @@ static struct gbm_bo *gbm_alloc(struct gbm_device *gbm,
 	 * For YV12, we request GR88, so halve the width since we're getting
 	 * 16bpp. Then increase the height by 1.5 for the U and V planes.
 	 */
-	if (handle->format == HAL_PIXEL_FORMAT_YV12) {
+	if (handle->droid_format == HAL_PIXEL_FORMAT_YV12) {
+		populate_YV12(handle);
 		width /= 2;
-		height += handle->height / 2;
+		height = DIV_ROUND_UP(handle->total_size, width);
 	}
 
 	ALOGV("create BO, size=%dx%d, fmt=%d, usage=%x",
-	      handle->width, handle->height, handle->format, usage);
+	      handle->width, handle->height, handle->droid_format, usage);
 	bo = gbm_bo_create(gbm, width, height, format, usage);
 	if (!bo) {
 		ALOGE("failed to create BO, size=%dx%d, fmt=%d, usage=%x",
-		      handle->width, handle->height, handle->format, usage);
+		      handle->width, handle->height, handle->droid_format, usage);
 		return NULL;
 	}
 
-	handle->prime_fd = gbm_bo_get_fd(bo);
-	handle->stride = gbm_bo_get_stride(bo);
-	#ifdef GBM_BO_IMPORT_FD_MODIFIER
-	handle->modifier = gbm_bo_get_modifier(bo);
-	#endif
+	handle->fds[0] = gbm_bo_get_fd(bo);
+	handle->pixel_stride = gbm_bo_get_stride(bo) * 8 / gbm_bo_get_bpp(bo);
+
+	if (handle->droid_format != HAL_PIXEL_FORMAT_YV12) {
+		handle->format = format;
+		#ifdef GBM_BO_IMPORT_FD_MODIFIER
+		handle->format_modifier = gbm_bo_get_modifier(bo);
+		handle->num_planes = gbm_bo_get_plane_count(bo);
+		ALOGE("Alloc, num planes: %i", handle->num_planes);
+		for (int i = 0; i < handle->num_planes; i++) {
+			handle->strides[i] = gbm_bo_get_stride_for_plane(bo, i);
+			handle->offsets[i] = gbm_bo_get_offset(bo, i);
+		}
+		#endif
+	}
 
 	return bo;
 }
@@ -265,7 +275,7 @@ static int gbm_map(buffer_handle_t handle, int x, int y, int w, int h,
 {
 	int err = 0;
 	int flags = GBM_BO_TRANSFER_READ;
-	struct gralloc_gbm_handle_t *gbm_handle = gralloc_handle(handle);
+	struct cros_gralloc_handle *gbm_handle = to_cros_gralloc_handle(handle);
 	struct gbm_bo *bo = gralloc_gbm_bo_from_handle(handle);
 	struct bo_data_t *bo_data = gbm_bo_data(bo);
 	uint32_t stride;
@@ -273,11 +283,11 @@ static int gbm_map(buffer_handle_t handle, int x, int y, int w, int h,
 	if (bo_data->map_data)
 		return -EINVAL;
 
-	if (gbm_handle->format == HAL_PIXEL_FORMAT_YV12) {
+	if (gbm_handle->droid_format == HAL_PIXEL_FORMAT_YV12) {
 		if (x || y)
 			ALOGE("can't map with offset for planar %p", bo);
 		w /= 2;
-		h += h / 2;
+		h = DIV_ROUND_UP(gbm_handle->total_size, w);
 	}
 
 	if (enable_write)
@@ -385,7 +395,7 @@ buffer_handle_t gralloc_gbm_bo_create(struct gbm_device *gbm,
 	struct gbm_bo *bo;
 	native_handle_t *handle;
 
-	handle = gralloc_handle_create(width, height, format, usage);
+	handle = cros_gralloc_handle_create(width, height, format, usage);
 	if (!handle)
 		return NULL;
 
@@ -398,7 +408,7 @@ buffer_handle_t gralloc_gbm_bo_create(struct gbm_device *gbm,
 	gbm_bo_handle_map.emplace(handle, bo);
 
 	/* in pixels */
-	*stride = gralloc_handle(handle)->stride / gralloc_gbm_get_bpp(format);
+	*stride = to_cros_gralloc_handle(handle)->pixel_stride;
 
 	return handle;
 }
@@ -410,7 +420,7 @@ int gralloc_gbm_bo_lock(buffer_handle_t handle,
 		int usage, int x, int y, int w, int h,
 		void **addr)
 {
-	struct gralloc_handle_t *gbm_handle = gralloc_handle(handle);
+	struct cros_gralloc_handle *gbm_handle = to_cros_gralloc_handle(handle);
 	struct gbm_bo *bo = gralloc_gbm_bo_from_handle(handle);
 	struct bo_data_t *bo_data;
 
@@ -498,14 +508,11 @@ int gralloc_gbm_bo_unlock(buffer_handle_t handle)
 	return 0;
 }
 
-#define GRALLOC_ALIGN(value, base) (((value) + ((base)-1)) & ~((base)-1))
-
 int gralloc_gbm_bo_lock_ycbcr(buffer_handle_t handle,
 		int usage, int x, int y, int w, int h,
 		struct android_ycbcr *ycbcr)
 {
-	struct gralloc_handle_t *hnd = gralloc_handle(handle);
-	int ystride, cstride;
+	struct cros_gralloc_handle *hnd = to_cros_gralloc_handle(handle);
 	void *addr;
 	int err;
 
@@ -517,30 +524,26 @@ int gralloc_gbm_bo_lock_ycbcr(buffer_handle_t handle,
 
 	memset(ycbcr->reserved, 0, sizeof(ycbcr->reserved));
 
-	switch (hnd->format) {
+	switch (hnd->droid_format) {
 	case HAL_PIXEL_FORMAT_YCrCb_420_SP:
-		ystride = cstride = GRALLOC_ALIGN(hnd->width, 128);
-		ycbcr->y = addr;
-		ycbcr->cr = (unsigned char *)addr + ystride * hnd->height;
-		ycbcr->cb = (unsigned char *)addr + ystride * hnd->height + 1;
-		ycbcr->ystride = ystride;
-		ycbcr->cstride = cstride;
+		ycbcr->cr = (unsigned char *)addr + hnd->offsets[1];
+		ycbcr->cb = (unsigned char *)addr + hnd->offsets[1] + 1;
 		ycbcr->chroma_step = 2;
 		break;
 	case HAL_PIXEL_FORMAT_YV12:
-		ystride = hnd->width;
-		cstride = GRALLOC_ALIGN(ystride / 2, 128);
-		ycbcr->y = addr;
-		ycbcr->cr = (unsigned char *)addr + ystride * hnd->height;
-		ycbcr->cb = (unsigned char *)addr + ystride * hnd->height + cstride * hnd->height / 2;
-		ycbcr->ystride = ystride;
-		ycbcr->cstride = cstride;
+		ycbcr->cr = (unsigned char *)addr + hnd->offsets[1];
+		ycbcr->cb = (unsigned char *)addr + hnd->offsets[2];
 		ycbcr->chroma_step = 1;
 		break;
 	default:
-		ALOGE("Can not lock buffer, invalid format: 0x%x", hnd->format);
+		ALOGE("Can not lock buffer, invalid format: 0x%x", hnd->droid_format);
 		return -EINVAL;
 	}
+	ycbcr->y = (unsigned char *)addr + hnd->offsets[0];
+	ycbcr->ystride = hnd->strides[0];
+	ycbcr->cstride = hnd->strides[1];
+
+	ALOGE("Y: %p, Cb: %p, Cr:%p", ycbcr->y, ycbcr->cb, ycbcr->cr);
 
 	return 0;
 }
