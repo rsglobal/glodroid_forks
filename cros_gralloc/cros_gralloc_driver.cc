@@ -11,6 +11,7 @@
 #include <sys/mman.h>
 #include <syscall.h>
 #include <xf86drm.h>
+#include <xf86drmMode.h>
 
 #include "../drv_priv.h"
 #include "../helpers.h"
@@ -62,20 +63,49 @@ cros_gralloc_driver::~cros_gralloc_driver()
 	}
 }
 
-static struct driver *init_try_node(int idx, char const *str)
+static bool is_kms_dev(const char *path)
+{
+	int fd = open(path, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return false;
+
+	auto res = drmModeGetResources(fd);
+	if (!res) {
+		close(fd);
+		return false;
+	}
+
+	bool is_kms = res->count_crtcs > 0 && res->count_connectors > 0 && res->count_encoders > 0;
+
+	drmModeFreeResources(res);
+	close(fd);
+
+	return is_kms;
+}
+
+static struct driver *init_try_node(int idx, bool use_card_node)
 {
 	int fd;
 	char *node;
 	struct driver *drv;
 
-	if (asprintf(&node, str, DRM_DIR_NAME, idx) < 0)
+	if (asprintf(&node, use_card_node ? "%s/card%d" : "%s/renderD%d", DRM_DIR_NAME, idx) < 0)
 		return NULL;
+
+	if (use_card_node && !is_kms_dev(node)) {
+		free(node);
+		return NULL;
+	}
 
 	fd = open(node, O_RDWR, 0);
 	free(node);
 
 	if (fd < 0)
 		return NULL;
+
+	/* Composer will need master access */
+	if (use_card_node)
+		drmDropMaster(fd);
 
 	drv = drv_create(fd);
 	if (!drv)
@@ -87,30 +117,28 @@ static struct driver *init_try_node(int idx, char const *str)
 int32_t cros_gralloc_driver::init()
 {
 	/*
-	 * Create a driver from render nodes first, then try card
+	 * Create a driver from card nodes first, then try render
 	 * nodes.
 	 *
 	 * TODO(gsingh): Enable render nodes on udl/evdi.
 	 */
 
-	char const *render_nodes_fmt = "%s/renderD%d";
-	char const *card_nodes_fmt = "%s/card%d";
 	uint32_t num_nodes = DRM_NUM_NODES;
 	uint32_t min_render_node = DRM_RENDER_NODE_START;
 	uint32_t max_render_node = (min_render_node + num_nodes);
 	uint32_t min_card_node = DRM_CARD_NODE_START;
 	uint32_t max_card_node = (min_card_node + num_nodes);
 
-	// Try render nodes...
-	for (uint32_t i = min_render_node; i < max_render_node; i++) {
-		drv_ = init_try_node(i, render_nodes_fmt);
+	// Try card nodes...
+	for (uint32_t i = min_card_node; i < max_card_node; i++) {
+		drv_ = init_try_node(i, true);
 		if (drv_)
 			return 0;
 	}
 
-	// Try card nodes... for vkms mostly.
-	for (uint32_t i = min_card_node; i < max_card_node; i++) {
-		drv_ = init_try_node(i, card_nodes_fmt);
+	// Try render nodes...
+	for (uint32_t i = min_render_node; i < max_render_node; i++) {
+		drv_ = init_try_node(i, false);
 		if (drv_)
 			return 0;
 	}

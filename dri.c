@@ -4,7 +4,7 @@
  * found in the LICENSE file.
  */
 
-#ifdef DRV_AMDGPU
+#if defined(DRI_GENERIC_DRV) || defined(DRV_AMDGPU)
 
 #include <assert.h>
 #include <dlfcn.h>
@@ -21,6 +21,10 @@
 #include "drv_priv.h"
 #include "helpers.h"
 #include "util.h"
+
+#ifdef DRI_USE_MESA3D_LOADER
+#include <loader.h>
+#endif
 
 static const struct {
 	uint32_t drm_format;
@@ -107,8 +111,6 @@ static int import_into_minigbm(struct dri_driver *dri, struct bo *bo)
 					      &num_planes)) {
 		return -errno;
 	}
-
-	bo->meta.num_planes = num_planes;
 
 	for (i = 0; i < num_planes; ++i) {
 		int prime_fd, stride, offset;
@@ -198,9 +200,11 @@ int dri_init(struct driver *drv, const char *dri_so_path, const char *driver_suf
 
 	struct dri_driver *dri = drv->priv;
 
-	dri->fd = open(drmGetRenderDeviceNameFromFd(drv_get_fd(drv)), O_RDWR);
+	dri->fd = open(drmGetDeviceNameFromFd(drv_get_fd(drv)), O_RDWR);
 	if (dri->fd < 0)
 		return -ENODEV;
+
+	drmDropMaster(dri->fd);
 
 	dri->driver_handle = dlopen(dri_so_path, RTLD_NOW | RTLD_GLOBAL);
 	if (!dri->driver_handle)
@@ -256,6 +260,55 @@ close_dri_fd:
 	close(dri->fd);
 	return -ENODEV;
 }
+/*
+ * The caller is responsible for setting drv->priv to a structure that derives from dri_driver.
+ */
+int dri_init2(struct driver *drv)
+{
+#ifdef DRI_GENERIC_DRV
+	char dri_pathname[64];
+	char drv_suffix[32];
+
+#ifdef DRI_USE_MESA3D_LOADER
+	/* Using x86 cards require static linking with mesa3d loader */
+	char *drv_name = loader_get_driver_for_fd(drv->fd);
+#else
+	drmVersionPtr drm_version;
+	drm_version = drmGetVersion(drv->fd);
+
+	if (!drm_version)
+		return -ENOMEM;
+
+	const char *drv_name = drm_version->name;
+#endif
+
+	sprintf(dri_pathname, STRINGIZE(DRI_DRIVER_DIR) "/%s_dri.so", drv_name);
+
+	strcpy(drv_suffix, drv_name);
+
+#ifdef DRI_USE_MESA3D_LOADER
+	free(drv_name);
+#else
+	drmFreeVersion(drm_version);
+#endif
+
+	/* replace all '-' chars with '_' in drv_suffix to use in dlsym() */
+	char *current_pos = strchr(drv_suffix, '-');
+	while (current_pos) {
+		*current_pos = '_';
+		current_pos = strchr(current_pos, '-');
+	}
+
+	if (dri_init(drv, dri_pathname, drv_suffix)) {
+		drv_log("dri_init failed for (%s) , (%s)", dri_pathname, drv_suffix);
+		return -ENODEV;
+	}
+
+	return 0;
+#else
+	return -ENOTSUPP;
+#endif
+}
 
 /*
  * The caller is responsible for freeing drv->priv.
@@ -271,14 +324,20 @@ void dri_close(struct driver *drv)
 	close(dri->fd);
 }
 
-int dri_bo_create(struct bo *bo, uint32_t width, uint32_t height, uint32_t format,
-		  uint64_t use_flags)
+int dri_bo_create_common(struct bo *bo, uint32_t width, uint32_t height, uint32_t format,
+			 uint64_t use_flags, const uint64_t *modifiers, uint32_t modifier_count)
 {
+	uint32_t width_ = width;
+	uint32_t height_ = height;
 	unsigned int dri_use;
 	int ret, dri_format;
+	int dri_multiplanar = false;
 	struct dri_driver *dri = bo->drv->priv;
 
 	dri_format = drm_format_to_dri_format(format);
+	/* Video buffers can't be allocated using DRI */
+	if (!dri_format)
+		dri_multiplanar = true;
 
 	/* Gallium drivers require shared to get the handle and stride. */
 	dri_use = __DRI_IMAGE_USE_SHARE;
@@ -286,19 +345,64 @@ int dri_bo_create(struct bo *bo, uint32_t width, uint32_t height, uint32_t forma
 		dri_use |= __DRI_IMAGE_USE_SCANOUT;
 	if (use_flags & BO_USE_CURSOR)
 		dri_use |= __DRI_IMAGE_USE_CURSOR;
-	if (use_flags & BO_USE_LINEAR)
+	if (use_flags & (BO_USE_LINEAR | BO_USE_SW_MASK))
 		dri_use |= __DRI_IMAGE_USE_LINEAR;
 
-	bo->priv = dri->image_extension->createImage(dri->device, width, height, dri_format,
-						     dri_use, NULL);
+	if (dri_multiplanar) {
+		int stride = drv_stride_from_format(format, width, 0);
+		drv_bo_from_format(bo, stride, height, format);
+		dri_format = __DRI_IMAGE_FORMAT_R8;
+		dri_use |= __DRI_IMAGE_USE_LINEAR;
+		width_ = stride / drv_bytes_per_pixel_from_format(format, 0);
+		height_ = DIV_ROUND_UP(bo->meta.total_size, width_);
+	}
+
+	if (modifier_count == 0) {
+		bo->priv = dri->image_extension->createImage(dri->device, width_, height_,
+							     dri_format, dri_use, NULL);
+	} else {
+		if (!dri->image_extension->createImageWithModifiers) {
+			return -ENOENT;
+		}
+		bo->priv = dri->image_extension->createImageWithModifiers(
+		    dri->device, width, height, dri_format, modifiers, modifier_count, NULL);
+	}
+
 	if (!bo->priv) {
 		ret = -errno;
 		return ret;
 	}
 
-	ret = import_into_minigbm(dri, bo);
-	if (ret)
-		goto free_image;
+	if (dri_multiplanar) {
+		__DRIimage *plane_image = dri->image_extension->fromPlanar(bo->priv, 0, NULL);
+		__DRIimage *image = plane_image ? plane_image : bo->priv;
+
+		if (!dri->image_extension->queryImage(image, __DRI_IMAGE_ATTRIB_HANDLE,
+						      &bo->handles[0].s32)) {
+			drv_log("queryImage() failed with error %s\n", strerror(errno));
+			ret = -errno;
+			goto free_image;
+		}
+
+		if (!dri->image_extension->queryImage(image, __DRI_IMAGE_ATTRIB_STRIDE,
+						      (int32_t *)&bo->meta.strides[0])) {
+			drv_log("queryImage() failed with error %s\n", strerror(errno));
+			ret = -errno;
+			goto free_image;
+		}
+
+		drv_bo_from_format(bo, bo->meta.strides[0], height, format);
+
+		if (plane_image)
+			dri->image_extension->destroyImage(plane_image);
+
+		for (size_t plane = 1; plane < bo->meta.num_planes; plane++)
+			bo->handles[plane].u32 = bo->handles[0].u32;
+	} else {
+		ret = import_into_minigbm(dri, bo);
+		if (ret)
+			goto free_image;
+	}
 
 	return 0;
 
@@ -307,34 +411,16 @@ free_image:
 	return ret;
 }
 
+int dri_bo_create(struct bo *bo, uint32_t width, uint32_t height, uint32_t format,
+		  uint64_t use_flags)
+{
+	return dri_bo_create_common(bo, width, height, format, use_flags, NULL, 0);
+}
+
 int dri_bo_create_with_modifiers(struct bo *bo, uint32_t width, uint32_t height, uint32_t format,
 				 const uint64_t *modifiers, uint32_t modifier_count)
 {
-	int ret, dri_format;
-	struct dri_driver *dri = bo->drv->priv;
-
-	if (!dri->image_extension->createImageWithModifiers) {
-		return -ENOENT;
-	}
-
-	dri_format = drm_format_to_dri_format(format);
-
-	bo->priv = dri->image_extension->createImageWithModifiers(
-	    dri->device, width, height, dri_format, modifiers, modifier_count, NULL);
-	if (!bo->priv) {
-		ret = -errno;
-		return ret;
-	}
-
-	ret = import_into_minigbm(dri, bo);
-	if (ret)
-		goto free_image;
-
-	return 0;
-
-free_image:
-	dri->image_extension->destroyImage(bo->priv);
-	return ret;
+	return dri_bo_create_common(bo, width, height, format, 0, modifiers, modifier_count);
 }
 
 int dri_bo_import(struct bo *bo, struct drv_import_fd_data *data)
