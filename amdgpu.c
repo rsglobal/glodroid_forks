@@ -713,6 +713,15 @@ static uint32_t amdgpu_resolve_format(struct driver *drv, uint32_t format, uint6
 	}
 }
 
+static int amdgpu_bo_get_plane_fd(struct bo *bo, size_t plane)
+{
+	if (bo->priv)
+		dri_bo_get_plane_fd(bo, plane);
+	else
+		/* Fallback to default implementation */
+		return -1;
+}
+
 const struct backend backend_amdgpu = {
 	.name = "amdgpu",
 	.init = amdgpu_init,
@@ -724,6 +733,7 @@ const struct backend backend_amdgpu = {
 	.bo_map = amdgpu_map_bo,
 	.bo_unmap = amdgpu_unmap_bo,
 	.bo_invalidate = amdgpu_bo_invalidate,
+	.bo_get_plane_fd = amdgpu_bo_get_plane_fd,
 	.resolve_format = amdgpu_resolve_format,
 	.num_planes_from_modifier = dri_num_planes_from_modifier,
 };

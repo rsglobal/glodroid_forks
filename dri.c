@@ -66,18 +66,21 @@ static bool lookup_extension(const __DRIextension *const *extensions, const char
 	return false;
 }
 
-/*
- * Close Gem Handle
- */
-static void close_gem_handle(uint32_t handle, int fd)
+int dri_bo_get_plane_fd(struct bo *bo, size_t plane)
 {
-	struct drm_gem_close gem_close = { 0 };
-	int ret = 0;
+	struct dri_driver *dri = bo->drv->priv;
+	__DRIimage *plane_image = NULL;
+	int fd = -1;
 
-	gem_close.handle = handle;
-	ret = drmIoctl(fd, DRM_IOCTL_GEM_CLOSE, &gem_close);
-	if (ret)
-		drv_log("DRM_IOCTL_GEM_CLOSE failed (handle=%x) error %d\n", handle, ret);
+	plane_image = dri->image_extension->fromPlanar(bo->priv, plane, NULL);
+	__DRIimage *image = plane_image ? plane_image : bo->priv;
+
+	dri->image_extension->queryImage(image, __DRI_IMAGE_ATTRIB_FD, &fd);
+
+	if (plane_image)
+		dri->image_extension->destroyImage(plane_image);
+
+	return fd;
 }
 
 /*
@@ -86,7 +89,6 @@ static void close_gem_handle(uint32_t handle, int fd)
  */
 static int import_into_minigbm(struct dri_driver *dri, struct bo *bo)
 {
-	uint32_t handle;
 	int ret, modifier_upper, modifier_lower, num_planes, i, j;
 	off_t dmabuf_sizes[DRV_MAX_PLANES];
 	__DRIimage *plane_image = NULL;
@@ -136,16 +138,14 @@ static int import_into_minigbm(struct dri_driver *dri, struct bo *bo)
 
 		lseek(prime_fd, 0, SEEK_SET);
 
-		ret = drmPrimeFDToHandle(bo->drv->fd, prime_fd, &handle);
-
 		close(prime_fd);
 
-		if (ret) {
-			drv_log("drmPrimeFDToHandle failed with %s\n", strerror(errno));
+		if (!dri->image_extension->queryImage(image, __DRI_IMAGE_ATTRIB_HANDLE,
+						      &bo->handles[i].s32)) {
+			drv_log("queryImage() failed with %s\n", strerror(errno));
+			ret = -errno;
 			goto cleanup;
 		}
-
-		bo->handles[i].u32 = handle;
 
 		bo->meta.strides[i] = stride;
 		bo->meta.offsets[i] = offset;
@@ -183,11 +183,6 @@ cleanup:
 		/* Multiple equivalent handles) */
 		if (i == j)
 			break;
-
-		/* This kind of goes horribly wrong when we already imported
-		 * the same handles earlier, as we should really reference
-		 * count handles. */
-		close_gem_handle(bo->handles[i].u32, bo->drv->fd);
 	}
 	return ret;
 }
@@ -397,7 +392,6 @@ int dri_bo_destroy(struct bo *bo)
 	struct dri_driver *dri = bo->drv->priv;
 
 	assert(bo->priv);
-	close_gem_handle(bo->handles[0].u32, bo->drv->fd);
 	dri->image_extension->destroyImage(bo->priv);
 	bo->priv = NULL;
 	return 0;

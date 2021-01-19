@@ -36,6 +36,7 @@ int dri_bo_import(struct bo *bo, struct drv_import_fd_data *data);
 int dri_bo_destroy(struct bo *bo);
 void *dri_bo_map(struct bo *bo, struct vma *vma, size_t plane, uint32_t map_flags);
 int dri_bo_unmap(struct bo *bo, struct vma *vma);
+int dri_bo_get_plane_fd(struct bo *bo, size_t plane);
 size_t dri_num_planes_from_modifier(struct driver *drv, uint32_t format, uint64_t modifier);
 
 #endif
