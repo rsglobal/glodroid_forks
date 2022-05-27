@@ -10,7 +10,9 @@
  */
 
 #include "sun8i_ui_scaler.h"
+
 #include "sun8i_vi_scaler.h"
+#include "sun8i_ui_layer.h"
 
 static const u32 lan2coefftab16[240] = {
 	0x00004000, 0x00033ffe, 0x00063efc, 0x000a3bfb,
@@ -127,7 +129,7 @@ static int sun8i_ui_scaler_coef_index(unsigned int step)
 	}
 }
 
-void sun8i_ui_scaler_enable(struct sun8i_mixer *mixer, int layer, bool enable)
+static void sun8i_ui_scaler_enable(struct sun8i_mixer *mixer, int layer, bool enable)
 {
 	u32 val, base;
 
@@ -145,9 +147,9 @@ void sun8i_ui_scaler_enable(struct sun8i_mixer *mixer, int layer, bool enable)
 	regmap_write(mixer->engine.regs, SUN8I_SCALER_GSU_CTRL(base), val);
 }
 
-void sun8i_ui_scaler_setup(struct sun8i_mixer *mixer, int layer,
-			   u32 src_w, u32 src_h, u32 dst_w, u32 dst_h,
-			   u32 hscale, u32 vscale, u32 hphase, u32 vphase)
+static void sun8i_ui_scaler_setup(struct sun8i_mixer *mixer, int layer,
+				  u32 src_w, u32 src_h, u32 dst_w, u32 dst_h,
+				  u32 hscale, u32 vscale, u32 hphase, u32 vphase)
 {
 	u32 insize, outsize;
 	int i, offset;
@@ -184,4 +186,49 @@ void sun8i_ui_scaler_setup(struct sun8i_mixer *mixer, int layer,
 		regmap_write(mixer->engine.regs,
 			     SUN8I_SCALER_GSU_HCOEFF(base, i),
 			     lan2coefftab16[offset + i]);
+}
+
+void sun8i_ui_scaler_deferred_disable(struct sun8i_mixer *mixer, struct sun8i_ui_layer *layer)
+{
+	if (layer->scale.en) {
+		layer->scale.en = false;
+		mixer->scale[layer->channel] = &layer->scale;
+		mixer->scale_updated = true;
+	}
+}
+
+void sun8i_ui_scaler_deferred_setup(struct sun8i_mixer *mixer, struct sun8i_ui_layer *layer,
+				    u32 src_w, u32 src_h, u32 dst_w, u32 dst_h,
+				    u32 hscale, u32 vscale, u32 hphase, u32 vphase)
+{
+	struct sun8i_uis_data data = {
+		.en = true,
+		.src_w = src_w,
+		.src_h = src_h,
+		.dst_w = dst_w,
+		.dst_h = dst_h,
+		.hscale = hscale,
+		.vscale = vscale,
+		.hphase = hphase,
+		.vphase = vphase,
+	};
+
+	if (memcmp(&data, &layer->scale, sizeof(data)) != 0) {
+		memcpy(&layer->scale, &data, sizeof(data));
+		mixer->scale[layer->channel] = &layer->scale;
+		mixer->scale_updated = true;
+	}
+}
+
+void sun8i_ui_scaler_apply(struct sun8i_mixer *mixer, int layer, struct sun8i_uis_data *data)
+{
+	if (!data->en) {
+		sun8i_ui_scaler_enable(mixer, layer, false);
+		return;
+	}
+
+	sun8i_ui_scaler_setup(mixer, layer, data->src_w, data->src_h, data->dst_w, data->dst_h,
+			      data->hscale, data->vscale, data->hphase, data->vphase);
+
+	sun8i_ui_scaler_enable(mixer, layer, true);
 }

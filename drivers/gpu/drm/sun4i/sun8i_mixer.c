@@ -251,6 +251,29 @@ int sun8i_mixer_drm_format_to_hw(u32 format, u32 *hw_format)
 	return -EINVAL;
 }
 
+static void sun8i_scaler_regs_update(struct sunxi_engine *engine)
+{
+	struct sun8i_mixer *mixer = engine_to_sun8i_mixer(engine);
+	int layer;
+
+	for (layer = 0; layer < SUN8I_MAX_LAYERS; layer++) {
+		if (!mixer->scale[layer])
+			continue;
+
+		if (layer < mixer->cfg->vi_num)
+			sun8i_vi_scaler_apply(mixer, layer,
+					      (struct sun8i_vis_data *)mixer->scale[layer]);
+		else
+			sun8i_ui_scaler_apply(mixer, layer,
+					      (struct sun8i_uis_data *)mixer->scale[layer]);
+
+		mixer->scale[layer] = 0;
+	}
+	mixer->scale_updated = false;
+
+	regmap_write(engine->regs, SUN8I_MIXER_GLOBAL_DBUFF, SUN8I_MIXER_GLOBAL_DBUFF_ENABLE);
+}
+
 static void sun8i_mixer_commit(struct sunxi_engine *engine)
 {
 	struct sun8i_mixer* mixer = engine_to_sun8i_mixer(engine);
@@ -283,8 +306,14 @@ static void sun8i_mixer_commit(struct sunxi_engine *engine)
 		mixer->hw_preconfigured = false;
 	}
 
-	regmap_write(engine->regs, SUN8I_MIXER_GLOBAL_DBUFF,
-		     SUN8I_MIXER_GLOBAL_DBUFF_ENABLE);
+	if (mixer->scale_updated) {
+		regmap_update_bits(engine->regs, SUN8I_MIXER_GLOBAL_CTL,
+				   SUN8I_MIXER_GLOBAL_FINISH_IRQ_EN,
+				   SUN8I_MIXER_GLOBAL_FINISH_IRQ_EN);
+	} else {
+		regmap_write(engine->regs, SUN8I_MIXER_GLOBAL_DBUFF,
+			     SUN8I_MIXER_GLOBAL_DBUFF_ENABLE);
+	}
 }
 
 static struct drm_plane **sun8i_layers_init(struct drm_device *drm,
@@ -391,6 +420,31 @@ static int sun8i_mixer_of_get_id(struct device_node *node)
 	return of_ep.id;
 }
 
+static irqreturn_t sun8i_mixer_handler(int irq, void *private)
+{
+	struct sun8i_mixer *mixer = private;
+	struct sunxi_engine *engine = &mixer->engine;
+
+	unsigned int status;
+
+	regmap_read(engine->regs, SUN8I_MIXER_GLOBAL_STATUS, &status);
+
+	if (!(status & SUN8I_MIXER_GLOBAL_FINISH_IRQ_STATUS))
+		return IRQ_NONE;
+
+	sun8i_scaler_regs_update(engine);
+
+	/* Acknowledge the interrupt */
+	regmap_update_bits(engine->regs, SUN8I_MIXER_GLOBAL_STATUS,
+			   SUN8I_MIXER_GLOBAL_FINISH_IRQ_STATUS,
+			   SUN8I_MIXER_GLOBAL_FINISH_IRQ_STATUS);
+
+	regmap_update_bits(engine->regs, SUN8I_MIXER_GLOBAL_CTL,
+			   SUN8I_MIXER_GLOBAL_FINISH_IRQ_EN, 0);
+
+	return IRQ_HANDLED;
+}
+
 static int sun8i_mixer_bind(struct device *dev, struct device *master,
 			      void *data)
 {
@@ -402,7 +456,7 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 	void __iomem *regs;
 	unsigned int base;
 	int plane_cnt;
-	int i, ret;
+	int i, ret, irq;
 
 	/*
 	 * The mixer uses single 32-bit register to store memory
@@ -478,6 +532,19 @@ static int sun8i_mixer_bind(struct device *dev, struct device *master,
 	ret = reset_control_deassert(mixer->reset);
 	if (ret) {
 		dev_err(dev, "Couldn't deassert our reset line\n");
+		return ret;
+	}
+
+	irq = platform_get_irq(pdev, 0);
+	if (irq < 0) {
+		dev_err(dev, "Couldn't find the IRQ\n");
+		return irq;
+	}
+
+	ret = devm_request_irq(dev, irq, sun8i_mixer_handler, IRQF_SHARED,
+			       dev_name(dev), mixer);
+	if (ret) {
+		dev_err(dev, "Couldn't request the IRQ\n");
 		return ret;
 	}
 
