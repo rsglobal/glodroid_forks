@@ -16,7 +16,12 @@
 
 /* this two macros assumes 16 fractional bits which is standard in DRM */
 #define SUN8I_UI_SCALER_SCALE_MIN		1
-#define SUN8I_UI_SCALER_SCALE_MAX		((1UL << 20) - 1)
+
+/* UI layer vertical scaledown is broken and can do only 4x instead of 16x.
+ * Horizontal scaledown still can do 16x but it doesn't make any sence to
+ * limit one axis and keep another.
+ */
+#define SUN8I_UI_SCALER_SCALE_MAX		((1UL << 18) - 1)
 
 #define SUN8I_UI_SCALER_SCALE_FRAC		20
 #define SUN8I_UI_SCALER_PHASE_FRAC		20
