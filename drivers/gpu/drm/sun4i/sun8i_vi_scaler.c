@@ -1027,11 +1027,17 @@ void sun8i_vi_scaler_deferred_setup(struct sun8i_mixer *mixer, struct sun8i_vi_l
 		.format = format,
 	};
 
-	if (memcmp(&data, &layer->scale, sizeof(data)) != 0) {
-		memcpy(&layer->scale, &data, sizeof(data));
-		mixer->scale[layer->channel] = &layer->scale;
-		mixer->scale_updated = true;
-	}
+	if (memcmp(&data, &layer->scale, sizeof(data)) == 0)
+		return;
+
+	sun8i_vi_scaler_setup(mixer, layer->channel, data.src_w, data.src_h, data.dst_w, data.dst_h,
+			      data.hscale, data.vscale, data.hphase, data.vphase,
+			      data.format);
+
+	memcpy(&layer->scale, &data, sizeof(data));
+
+	mixer->scale[layer->channel] = &layer->scale;
+	mixer->scale_updated = true;
 }
 
 void sun8i_vi_scaler_apply(struct sun8i_mixer *mixer, int layer, struct sun8i_vis_data *data)
@@ -1040,10 +1046,6 @@ void sun8i_vi_scaler_apply(struct sun8i_mixer *mixer, int layer, struct sun8i_vi
 		sun8i_vi_scaler_enable(mixer, layer, false);
 		return;
 	}
-
-	sun8i_vi_scaler_setup(mixer, layer, data->src_w, data->src_h, data->dst_w, data->dst_h,
-			      data->hscale, data->vscale, data->hphase, data->vphase,
-			      data->format);
 
 	sun8i_vi_scaler_enable(mixer, layer, true);
 }
